@@ -1,0 +1,22 @@
+/CLAUDE.md
+
+# Secrets
+.env
+
+# IDE
+.idea/
+
+# Virtual environment
+venv/
+
+# Large data files
+*.parquet
+*.mp4
+
+# Presentation/video folder
+Argument mining/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
