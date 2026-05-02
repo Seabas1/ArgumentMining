@@ -8,6 +8,7 @@
 
 # Virtual environment
 venv/
+venv311/
 
 # Large data files
 *.parquet
