@@ -28,11 +28,18 @@ DATASETS = {
         "lang": "ru",
         "hf_id": None,
     },
+    "sudresh": {
+        "label": "sud-resh-benchmark — судебные решения РФ (10 правовых областей)",
+        "dir": Path("data/sudresh"),
+        "lang": "ru",
+        "hf_id": "lawful-good-project/sud-resh-benchmark",
+    },
 }
 
 PROVIDERS = {
     "ollama":    "Ollama (локально)",
     "gemini":    "Gemini API",
+    "local":     "Своя модель (ruBERT fine-tuned)",
 }
 
 HF_DOWNLOAD_RETRIES   = 3
@@ -912,9 +919,51 @@ def load_rutar(n: int, raw_dir: Path) -> list[dict]:
     return docs[:n]
 
 
+def load_sudresh(n: int, raw_dir: Path) -> list[dict]:
+    cache_file = raw_dir / "sudresh_docs.jsonl"
+    cached = load_cached_docs(cache_file)
+    if len(cached) >= n:
+        print(f"Берём {n} документов из кэша: {cache_file}")
+        return cached[:n]
+
+    print(f"Загружаем sud-resh-benchmark с HuggingFace...")
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        print("Установи: pip install datasets")
+        sys.exit(1)
+
+    ds = load_dataset("lawful-good-project/sud-resh-benchmark", split="train")
+
+    # Каждое решение повторяется 7 раз (по числу инструкций) — дедуплицируем по source
+    seen_texts: set[str] = {doc["text"] for doc in cached}
+    docs = list(cached)
+
+    for item in ds:
+        if len(docs) >= n:
+            break
+        # source — исходный текст судебного решения
+        text = str(item.get("source") or item.get("text") or "").strip()
+        if len(text) < 200 or text in seen_texts:
+            continue
+        seen_texts.add(text)
+
+        # doc_id из хеша id записи + категория
+        raw_id  = str(item.get("id", ""))[:16]
+        category = str(item.get("category", "")).replace("sud_resh_", "")
+        doc_id  = f"sudresh_{category}_{raw_id}" if raw_id else f"sudresh_{len(docs):05d}"
+
+        docs.append({"doc_id": doc_id, "text": text})
+
+    save_cached_docs(docs, cache_file)
+    print(f"Загружено {len(docs)} уникальных решений")
+    return docs[:n]
+
+
 DATASET_LOADERS = {
     "ruslawod": load_ruslawod,
     "rutar":    load_rutar,
+    "sudresh":  load_sudresh,
 }
 
 
