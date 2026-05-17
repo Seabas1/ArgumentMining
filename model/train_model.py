@@ -29,7 +29,7 @@ MODEL_NAME    = "DeepPavlov/rubert-base-cased"
 OUTPUT_DIR    = Path("model/checkpoints")
 MAX_LENGTH    = 256
 BATCH_SIZE    = 16
-EPOCHS        = 5
+EPOCHS        = 10
 LR            = 2e-5
 WARMUP_RATIO  = 0.1
 VAL_RATIO     = 0.15
@@ -110,13 +110,26 @@ class ArgMiningDataset(Dataset):
 
 # ── Шаг 3: Модель и цикл обучения ─────────────────────────────────────────────
 
-def train_epoch(model, loader, optimizer, scheduler, device) -> float:
+def compute_class_weights(samples: list[dict]) -> torch.Tensor:
+    counts = Counter(s["label"] for s in samples)
+    total  = len(samples)
+    # inversely proportional to frequency, normalised so mean weight = 1
+    weights = torch.tensor(
+        [total / (len(LABELS) * counts.get(lbl, 1)) for lbl in LABELS],
+        dtype=torch.float,
+    )
+    return weights / weights.mean()
+
+
+def train_epoch(model, loader, optimizer, scheduler, device,
+                class_weights: torch.Tensor) -> float:
     model.train()
+    loss_fn    = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))
     total_loss = 0.0
     for batch in loader:
-        batch = {k: v.to(device) for k, v in batch.items()}
-        outputs = model(**batch)
-        loss = outputs.loss
+        batch   = {k: v.to(device) for k, v in batch.items()}
+        logits  = model(**{k: v for k, v in batch.items() if k != "labels"}).logits
+        loss    = loss_fn(logits, batch["labels"])
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
@@ -186,6 +199,10 @@ def main() -> None:
         label2id=LABEL2ID,
     ).to(device)
 
+    class_weights = compute_class_weights(train_data)
+    print(f"\nВеса классов: " +
+          ", ".join(f"{lbl}={class_weights[i]:.2f}" for i, lbl in enumerate(LABELS)))
+
     total_steps   = len(train_loader) * EPOCHS
     warmup_steps  = int(total_steps * WARMUP_RATIO)
     optimizer     = AdamW(model.parameters(), lr=LR, weight_decay=0.01)
@@ -200,7 +217,7 @@ def main() -> None:
 
     print(f"\nОбучение: {EPOCHS} эпох, {len(train_loader)} батчей/эпоха\n")
     for epoch in range(1, EPOCHS + 1):
-        train_loss       = train_epoch(model, train_loader, optimizer, scheduler, device)
+        train_loss       = train_epoch(model, train_loader, optimizer, scheduler, device, class_weights)
         acc, f1, report  = eval_epoch(model, val_loader, device)
 
         marker = " ← лучший" if f1 > best_f1 else ""
