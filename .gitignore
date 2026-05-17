@@ -10,6 +10,9 @@
 venv/
 venv311/
 
+# Data (annotated + raw)
+data/
+
 # Large data files
 *.parquet
 *.mp4

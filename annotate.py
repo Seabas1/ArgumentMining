@@ -421,7 +421,7 @@ class _OllamaHTTPClient:
             payload["format"] = format
         if options:
             payload["options"] = options
-        resp = _requests.post(f"{self.BASE}/api/chat", json=payload, timeout=300)
+        resp = _requests.post(f"{self.BASE}/api/chat", json=payload, timeout=(10, 120))
         resp.raise_for_status()
         data = resp.json()
         return {"message": {"content": data["message"]["content"]}}
@@ -431,7 +431,7 @@ def _make_ollama_client():
     """Возвращает ollama.Client() или _OllamaHTTPClient() как fallback."""
     try:
         import ollama
-        return ollama.Client()
+        return ollama.Client(timeout=120)
     except ImportError:
         if _requests is None:
             print("Ошибка: не установлен ни пакет 'ollama', ни 'requests'.")
