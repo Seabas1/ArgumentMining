@@ -40,14 +40,23 @@ SEED          = 42
 
 def load_samples(annotations_file: Path) -> list[dict]:
     samples = []
+    skipped = 0
     for line in annotations_file.read_text(encoding="utf-8-sig").splitlines():
-        if not line.strip():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            skipped += 1
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
         label = row.get("label", "").upper()
         text  = row.get("text", "").strip()
         if label in LABEL2ID and text:
             samples.append({"text": text, "label": label})
+    if skipped:
+        print(f"  Пропущено строк: {skipped}")
     return samples
 
 
