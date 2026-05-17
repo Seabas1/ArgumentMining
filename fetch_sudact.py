@@ -80,7 +80,7 @@ def _clean_text(raw: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SUDACT_BASE      = "https://sudact.ru"
-_SUDACT_SEARCH    = f"{_SUDACT_BASE}/arbitral/"
+_SUDACT_SEARCH    = f"{_SUDACT_BASE}/arbitral/doc/"
 _SUDACT_NOISE     = [
     "script", "style", "nav", "header", "footer",
     ".sidebar", ".breadcrumb", ".doc-navigation",
@@ -143,10 +143,9 @@ def fetch_sudact(query: str, n: int, out_file: Path, existing_ids: set,
 
     while len(docs) < n:
         params = {
-            "page":     page,
-            "count":    PAGE_SIZE,
-            "txt":      query,
-            # без doc_type — ищем по всем типам документов
+            "page":         page,
+            "count":        PAGE_SIZE,
+            "arbitral-txt": query,
         }
         print(f"  sudact: страница {page} (найдено {len(docs)}/{n})...")
         resp = _get(_SUDACT_SEARCH, params=params)
