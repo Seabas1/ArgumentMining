@@ -88,17 +88,25 @@ _SUDACT_NOISE     = [
 ]
 
 
-def _sudact_parse_search(html: str) -> list[str]:
+def _sudact_parse_search(html: str, debug: bool = False) -> list[str]:
     soup = BeautifulSoup(html, "html.parser")
+
+    if debug:
+        # Печатаем все ссылки на странице чтобы найти нужный паттерн
+        all_links = [(a.get("href", ""), a.get_text(strip=True)[:60]) for a in soup.find_all("a")]
+        print(f"  [debug] всего ссылок на странице: {len(all_links)}")
+        for href, text in all_links[:30]:
+            print(f"    {href!r:60s}  {text}")
+
     urls = []
-    for a in soup.select("a.result__title, a.doc-title, h3 > a, .result-title a"):
-        href = a.get("href", "")
-        if not href:
-            continue
-        if not href.startswith("http"):
-            href = _SUDACT_BASE + href
-        urls.append(href)
-    return urls
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        # Ищем любые ссылки на документы арбитражных судов
+        if re.search(r"/(arbitral|regular|vlasimov)/doc/", href):
+            if not href.startswith("http"):
+                href = _SUDACT_BASE + href
+            urls.append(href)
+    return list(dict.fromkeys(urls))  # убираем дубли, сохраняем порядок
 
 
 def _sudact_parse_doc(html: str, url: str) -> dict | None:
@@ -126,23 +134,42 @@ def _sudact_parse_doc(html: str, url: str) -> dict | None:
     return {"doc_id": f"sudact_{doc_id}", "text": text, "url": url}
 
 
-def fetch_sudact(query: str, n: int, out_file: Path, existing_ids: set) -> list[dict]:
+def fetch_sudact(query: str, n: int, out_file: Path, existing_ids: set,
+                 debug: bool = False) -> list[dict]:
     docs = []
     page = 1
     seen: set[str] = set()
+    empty_pages = 0
 
     while len(docs) < n:
-        params = {"page": page, "count": PAGE_SIZE, "txt": query, "doc_type": "решение"}
+        params = {
+            "page":     page,
+            "count":    PAGE_SIZE,
+            "txt":      query,
+            # без doc_type — ищем по всем типам документов
+        }
         print(f"  sudact: страница {page} (найдено {len(docs)}/{n})...")
         resp = _get(_SUDACT_SEARCH, params=params)
         if resp is None:
             break
 
-        urls = _sudact_parse_search(resp.text)
-        if not urls:
-            print("  Результаты кончились.")
-            break
+        if debug and page == 1:
+            Path("debug_sudact_search.html").write_text(resp.text, encoding="utf-8")
+            print("  [debug] первая страница сохранена → debug_sudact_search.html")
 
+        urls = _sudact_parse_search(resp.text, debug=(debug and page == 1))
+
+        if not urls:
+            empty_pages += 1
+            print(f"  Нет ссылок на документы (пустых страниц подряд: {empty_pages})")
+            if empty_pages >= 3:
+                print("  Останавливаемся — сайт не возвращает результаты.")
+                break
+            page += 1
+            time.sleep(DELAY)
+            continue
+
+        empty_pages = 0
         for url in urls:
             if url in seen:
                 continue
@@ -345,6 +372,8 @@ def main():
     parser.add_argument("--source", choices=list(SOURCES.keys()), default=None)
     parser.add_argument("--query",  default=None,  help="Поисковый запрос")
     parser.add_argument("--n",      type=int, default=None, help="Количество документов")
+    parser.add_argument("--debug",  action="store_true",
+                        help="Сохранить первую страницу поиска в debug_*.html и напечатать все ссылки")
     args = parser.parse_args()
 
     if not all([args.source, args.query, args.n]):
@@ -368,7 +397,8 @@ def main():
     print(f"Запрос:   '{query}'")
     print(f"Нужно ещё: {need} документов\n")
 
-    new_docs = fetch_fn(query, need, out_file, existing_ids)
+    kwargs = {"debug": args.debug} if source == "sudact" else {}
+    new_docs = fetch_fn(query, need, out_file, existing_ids, **kwargs)
     _save_new(new_docs, out_file)
 
     print(f"\nГотово: скачано {len(new_docs)} новых документов → {out_file}")
