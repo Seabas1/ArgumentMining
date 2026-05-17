@@ -80,7 +80,7 @@ def _clean_text(raw: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SUDACT_BASE      = "https://sudact.ru"
-_SUDACT_SEARCH    = f"{_SUDACT_BASE}/arbitral/doc/"
+_SUDACT_AJAX      = f"{_SUDACT_BASE}/arbitral/doc_ajax/"
 _SUDACT_NOISE     = [
     "script", "style", "nav", "header", "footer",
     ".sidebar", ".breadcrumb", ".doc-navigation",
@@ -88,25 +88,22 @@ _SUDACT_NOISE     = [
 ]
 
 
-def _sudact_parse_search(html: str, debug: bool = False) -> list[str]:
-    soup = BeautifulSoup(html, "html.parser")
-
+def _sudact_parse_ajax(json_resp: dict, debug: bool = False) -> list[str]:
+    """Парсит ответ AJAX-эндпоинта: JSON с полем content (HTML)."""
+    content_html = json_resp.get("content", "")
     if debug:
-        # Печатаем все ссылки на странице чтобы найти нужный паттерн
-        all_links = [(a.get("href", ""), a.get_text(strip=True)[:60]) for a in soup.find_all("a")]
-        print(f"  [debug] всего ссылок на странице: {len(all_links)}")
-        for href, text in all_links[:30]:
-            print(f"    {href!r:60s}  {text}")
+        total = json_resp.get("total_found", "?")
+        print(f"  [debug] total_found={total!r}, content length={len(content_html)}")
 
+    soup = BeautifulSoup(content_html, "html.parser")
     urls = []
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        # Ищем любые ссылки на документы арбитражных судов
-        if re.search(r"/(arbitral|regular|vlasimov)/doc/", href):
+        if re.search(r"/arbitral/doc/[^/]+/", href):
             if not href.startswith("http"):
                 href = _SUDACT_BASE + href
             urls.append(href)
-    return list(dict.fromkeys(urls))  # убираем дубли, сохраняем порядок
+    return list(dict.fromkeys(urls))
 
 
 def _sudact_parse_doc(html: str, url: str) -> dict | None:
@@ -144,19 +141,26 @@ def fetch_sudact(query: str, n: int, out_file: Path, existing_ids: set,
     while len(docs) < n:
         params = {
             "page":         page,
-            "count":        PAGE_SIZE,
             "arbitral-txt": query,
         }
         print(f"  sudact: страница {page} (найдено {len(docs)}/{n})...")
-        resp = _get(_SUDACT_SEARCH, params=params)
+        resp = _get(_SUDACT_AJAX, params=params)
         if resp is None:
             break
 
-        if debug and page == 1:
-            Path("debug_sudact_search.html").write_text(resp.text, encoding="utf-8")
-            print("  [debug] первая страница сохранена → debug_sudact_search.html")
+        try:
+            data = resp.json()
+        except Exception:
+            print(f"  [ошибка] ответ не JSON: {resp.text[:200]}")
+            break
 
-        urls = _sudact_parse_search(resp.text, debug=(debug and page == 1))
+        if debug and page == 1:
+            Path("debug_sudact_ajax.json").write_text(
+                json.dumps(data, ensure_ascii=False, indent=2)[:5000], encoding="utf-8"
+            )
+            print("  [debug] первый ответ сохранён → debug_sudact_ajax.json")
+
+        urls = _sudact_parse_ajax(data, debug=(debug and page == 1))
 
         if not urls:
             empty_pages += 1
