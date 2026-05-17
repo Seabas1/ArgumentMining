@@ -1,19 +1,22 @@
 """
-Загрузчик решений арбитражных судов с sudact.ru.
-
-Скачивает решения по налоговым спорам и сохраняет в формате,
-совместимом с остальным пайплайном (jsonl, поля doc_id + text).
+Загрузчик судебных решений.
+Поддерживаемые источники:
+  sudact  — sudact.ru (арбитражные суды, HTML-парсинг)
+  gas     — ГАС Правосудие bsr.sudrf.ru (суды общей юрисдикции, JSON API)
 
 Запуск из корня проекта:
-    python data/sudact/fetch_sudact.py --n 200 --query "налог НДС"
+    python fetch_sudact.py                        # интерактивное меню
+    python fetch_sudact.py --source sudact --n 200 --query "налог НДС"
+    python fetch_sudact.py --source gas    --n 200 --query "налог НДФЛ"
 
-Результат: data/sudact/raw/sudact_docs.jsonl
+Результат: data/<source>/raw/docs.jsonl
 """
 
 import argparse
 import json
 import re
 import time
+import uuid
 from pathlib import Path
 
 try:
@@ -23,13 +26,10 @@ except ImportError:
     print("Установи зависимости: pip install requests beautifulsoup4")
     raise SystemExit(1)
 
-# ── Константы ──────────────────────────────────────────────────────────────────
+# ── Общие настройки ────────────────────────────────────────────────────────────
 
-BASE_URL    = "https://sudact.ru"
-SEARCH_URL  = f"{BASE_URL}/arbitral/"
-OUT_FILE    = Path("data/sudact/raw/sudact_docs.jsonl")
-DELAY       = 2.0   # секунд между запросами (не перегружаем сервер)
-PAGE_SIZE   = 20
+DELAY     = 2.0
+PAGE_SIZE = 20
 
 HEADERS = {
     "User-Agent": (
@@ -38,24 +38,7 @@ HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "ru-RU,ru;q=0.9",
-    "Referer": BASE_URL,
 }
-
-# Метки решения — в заголовке судебного акта
-_DECISION_RE = re.compile(
-    r"(решение|постановление|определение|приговор)",
-    re.IGNORECASE,
-)
-
-# Разделы страницы которые не нужны в тексте
-_NOISE_SELECTORS = [
-    "script", "style", "nav", "header", "footer",
-    ".sidebar", ".breadcrumb", ".doc-navigation",
-    ".doc-info", ".act-meta", ".act-controls",
-]
-
-
-# ── HTTP ───────────────────────────────────────────────────────────────────────
 
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -74,33 +57,56 @@ def _get(url: str, params: dict = None, retries: int = 3) -> requests.Response |
     return None
 
 
-# ── Парсинг ────────────────────────────────────────────────────────────────────
+def _post(url: str, payload: dict, retries: int = 3) -> requests.Response | None:
+    for attempt in range(retries):
+        try:
+            resp = session.post(url, json=payload, timeout=20)
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException as e:
+            wait = DELAY * (attempt + 1)
+            print(f"  [retry {attempt + 1}/{retries}] {e} — ждём {wait:.0f}с")
+            time.sleep(wait)
+    return None
 
-def parse_search_page(html: str) -> list[dict]:
-    """Возвращает [{title, url}] с одной страницы поиска."""
+
+def _clean_text(raw: str) -> str:
+    raw = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", raw)
+    return re.sub(r"\s{2,}", " ", raw).strip()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ИСТОЧНИК 1: sudact.ru
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SUDACT_BASE      = "https://sudact.ru"
+_SUDACT_SEARCH    = f"{_SUDACT_BASE}/arbitral/"
+_SUDACT_NOISE     = [
+    "script", "style", "nav", "header", "footer",
+    ".sidebar", ".breadcrumb", ".doc-navigation",
+    ".doc-info", ".act-meta", ".act-controls",
+]
+
+
+def _sudact_parse_search(html: str) -> list[str]:
     soup = BeautifulSoup(html, "html.parser")
-    results = []
+    urls = []
     for a in soup.select("a.result__title, a.doc-title, h3 > a, .result-title a"):
-        href  = a.get("href", "")
-        title = a.get_text(strip=True)
-        if not href or not title:
+        href = a.get("href", "")
+        if not href:
             continue
         if not href.startswith("http"):
-            href = BASE_URL + href
-        results.append({"title": title, "url": href})
-    return results
+            href = _SUDACT_BASE + href
+        urls.append(href)
+    return urls
 
 
-def parse_document(html: str, url: str) -> dict | None:
-    """Извлекает чистый текст из страницы судебного акта."""
+def _sudact_parse_doc(html: str, url: str) -> dict | None:
     soup = BeautifulSoup(html, "html.parser")
-
-    # Удаляем шум
-    for sel in _NOISE_SELECTORS:
+    for sel in _SUDACT_NOISE:
         for tag in soup.select(sel):
             tag.decompose()
 
-    # Ищем основной блок с текстом
     body = (
         soup.select_one(".act-text")
         or soup.select_one("#documentText")
@@ -111,115 +117,261 @@ def parse_document(html: str, url: str) -> dict | None:
     if body is None:
         return None
 
-    text = body.get_text(separator=" ", strip=True)
-    text = re.sub(r"\s{2,}", " ", text).strip()
-
+    text = _clean_text(body.get_text(separator=" ", strip=True))
     if len(text) < 300:
         return None
 
-    # doc_id из URL: последний числовой сегмент
-    parts = url.rstrip("/").split("/")
-    doc_id = next((p for p in reversed(parts) if p.isdigit()), None)
-    if not doc_id:
-        doc_id = re.sub(r"[^\w]", "_", url[-40:])
-
-    return {"doc_id": doc_id, "text": text, "url": url}
+    parts  = url.rstrip("/").split("/")
+    doc_id = next((p for p in reversed(parts) if p.isdigit()), None) or re.sub(r"[^\w]", "_", url[-40:])
+    return {"doc_id": f"sudact_{doc_id}", "text": text, "url": url}
 
 
-# ── Поиск ──────────────────────────────────────────────────────────────────────
+def fetch_sudact(query: str, n: int, out_file: Path, existing_ids: set) -> list[dict]:
+    docs = []
+    page = 1
+    seen: set[str] = set()
 
-def search_documents(query: str, n: int) -> list[dict]:
-    """Возвращает список {title, url} найденных документов (до n штук)."""
-    found = []
-    page  = 1
-    seen  = set()
-
-    while len(found) < n:
-        params = {
-            "page":  page,
-            "count": PAGE_SIZE,
-            "txt":   query,
-            "doc_type": "решение",
-        }
-        print(f"  Поиск: страница {page} (найдено {len(found)}/{n})...")
-        resp = _get(SEARCH_URL, params=params)
+    while len(docs) < n:
+        params = {"page": page, "count": PAGE_SIZE, "txt": query, "doc_type": "решение"}
+        print(f"  sudact: страница {page} (найдено {len(docs)}/{n})...")
+        resp = _get(_SUDACT_SEARCH, params=params)
         if resp is None:
             break
 
-        items = parse_search_page(resp.text)
-        if not items:
+        urls = _sudact_parse_search(resp.text)
+        if not urls:
             print("  Результаты кончились.")
             break
 
-        for item in items:
-            if item["url"] not in seen:
-                seen.add(item["url"])
-                found.append(item)
-            if len(found) >= n:
+        for url in urls:
+            if url in seen:
+                continue
+            seen.add(url)
+
+            r = _get(url)
+            if r is None:
+                continue
+
+            doc = _sudact_parse_doc(r.text, url)
+            if doc is None or doc["doc_id"] in existing_ids:
+                continue
+
+            existing_ids.add(doc["doc_id"])
+            docs.append(doc)
+            print(f"    [{len(docs):3d}/{n}] {doc['doc_id']}  {len(doc['text'])} симв.")
+            time.sleep(DELAY)
+
+            if len(docs) >= n:
                 break
 
         page += 1
         time.sleep(DELAY)
 
-    return found[:n]
+    return docs
 
 
-# ── main ───────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# ИСТОЧНИК 2: ГАС Правосудие (bsr.sudrf.ru) — JSON API
+# ══════════════════════════════════════════════════════════════════════════════
 
-def main():
-    parser = argparse.ArgumentParser(description="Загрузчик решений с sudact.ru")
-    parser.add_argument("--n",     type=int, default=100,
-                        help="Сколько документов скачать (по умолчанию 100)")
-    parser.add_argument("--query", default="налог НДС НДФЛ",
-                        help="Поисковый запрос (по умолчанию 'налог НДС НДФЛ')")
-    args = parser.parse_args()
+_GAS_SEARCH = "https://bsr.sudrf.ru/bigs/s.action"
+_GAS_DOC    = "https://bsr.sudrf.ru/bigs/ui.action"
 
-    OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    # Загружаем уже скачанные
-    existing_ids: set[str] = set()
-    existing_docs: list[dict] = []
-    if OUT_FILE.exists():
-        for line in OUT_FILE.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                doc = json.loads(line)
-                existing_ids.add(doc["doc_id"])
-                existing_docs.append(doc)
-        print(f"Уже скачано: {len(existing_docs)} документов")
+def _gas_search_payload(query: str, start: int) -> dict:
+    return {
+        "type": "MULTIPLEQUERY",
+        "multiqueryRequest": {
+            "queryRequests": [{
+                "type": "Q",
+                "queryString": query,
+                "fieldRequests": [{
+                    "field":    "fullText",
+                    "values":   [query],
+                    "operator": "CONTAINS",
+                }],
+            }],
+        },
+        "start":      start,
+        "rows":       PAGE_SIZE,
+        "uid":        str(uuid.uuid4()),
+        "senderType": "MULTIQUERY",
+    }
 
-    need = args.n - len(existing_docs)
-    if need <= 0:
-        print(f"Уже есть {len(existing_docs)} ≥ {args.n} документов, ничего не делаем.")
-        return
 
-    print(f"\nИщем документы: запрос='{args.query}', нужно ещё {need}")
-    candidates = search_documents(args.query, need * 3)  # с запасом — часть отсеется
-    print(f"Найдено кандидатов: {len(candidates)}")
+def _gas_fetch_doc_text(doc_id: str) -> str | None:
+    resp = _get(_GAS_DOC, params={"id": doc_id})
+    if resp is None:
+        return None
 
-    new_docs = []
-    for item in candidates:
-        if len(new_docs) >= need:
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for tag in soup.select("script, style, nav, header, footer, .sidebar"):
+        tag.decompose()
+
+    body = (
+        soup.select_one("#documentBody")
+        or soup.select_one(".decision-text")
+        or soup.select_one(".act-text")
+        or soup.select_one("article")
+        or soup.select_one("main")
+    )
+    if body is None:
+        return None
+
+    return _clean_text(body.get_text(separator=" ", strip=True))
+
+
+def fetch_gas(query: str, n: int, out_file: Path, existing_ids: set) -> list[dict]:
+    docs  = []
+    start = 0
+
+    gas_session = requests.Session()
+    gas_session.headers.update({
+        **HEADERS,
+        "Content-Type": "application/json",
+        "Referer":      "https://bsr.sudrf.ru/",
+        "Origin":       "https://bsr.sudrf.ru",
+    })
+
+    while len(docs) < n:
+        print(f"  ГАС: записи {start}–{start + PAGE_SIZE - 1} (найдено {len(docs)}/{n})...")
+        try:
+            resp = gas_session.post(
+                _GAS_SEARCH,
+                json=_gas_search_payload(query, start),
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"  [ошибка поиска] {e}")
             break
 
-        resp = _get(item["url"])
-        if resp is None:
-            continue
+        items = data.get("response", {}).get("docs", [])
+        if not items:
+            print("  Результаты кончились.")
+            break
 
-        doc = parse_document(resp.text, item["url"])
-        if doc is None or doc["doc_id"] in existing_ids:
-            continue
+        for item in items:
+            doc_id = str(item.get("id") or item.get("uid") or "")
+            if not doc_id or f"gas_{doc_id}" in existing_ids:
+                continue
 
-        existing_ids.add(doc["doc_id"])
-        new_docs.append(doc)
-        print(f"  [{len(new_docs):3d}/{need}] {doc['doc_id']}  {len(doc['text'])} симв.")
+            text = item.get("fullText") or item.get("text") or ""
+            if not text:
+                # Полный текст не в ответе — запрашиваем страницу документа
+                text = _gas_fetch_doc_text(doc_id) or ""
+                time.sleep(DELAY)
+
+            text = _clean_text(text)
+            if len(text) < 300:
+                continue
+
+            full_id = f"gas_{doc_id}"
+            existing_ids.add(full_id)
+            doc = {
+                "doc_id": full_id,
+                "text":   text,
+                "url":    f"{_GAS_DOC}?id={doc_id}",
+            }
+            docs.append(doc)
+            print(f"    [{len(docs):3d}/{n}] {full_id}  {len(text)} симв.")
+
+            if len(docs) >= n:
+                break
+
+        start += PAGE_SIZE
         time.sleep(DELAY)
 
-    # Дозаписываем новые
-    with OUT_FILE.open("a", encoding="utf-8") as f:
-        for doc in new_docs:
+    return docs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Общий I/O и main
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _load_existing(out_file: Path) -> tuple[list[dict], set[str]]:
+    docs, ids = [], set()
+    if out_file.exists():
+        for line in out_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                doc = json.loads(line)
+                ids.add(doc["doc_id"])
+                docs.append(doc)
+    return docs, ids
+
+
+def _save_new(docs: list[dict], out_file: Path) -> None:
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    with out_file.open("a", encoding="utf-8") as f:
+        for doc in docs:
             f.write(json.dumps(doc, ensure_ascii=False) + "\n")
 
-    print(f"\nГотово: скачано {len(new_docs)} новых документов → {OUT_FILE}")
+
+SOURCES = {
+    "sudact": ("СудАкт (sudact.ru — арбитражные суды)",        fetch_sudact),
+    "gas":    ("ГАС Правосудие (bsr.sudrf.ru — общая юрисдикция)", fetch_gas),
+}
+
+
+def interactive_setup(args) -> tuple[str, str, int]:
+    print("\n" + "=" * 52)
+    print("   Загрузчик судебных решений")
+    print("=" * 52)
+
+    if args.source:
+        source = args.source
+    else:
+        print("\nИсточник:")
+        keys = list(SOURCES.keys())
+        for i, (k, (label, _)) in enumerate(SOURCES.items(), 1):
+            print(f"  {i}. {label}")
+        while True:
+            raw = input("Выбор [1]: ").strip() or "1"
+            if raw.isdigit() and 1 <= int(raw) <= len(keys):
+                source = keys[int(raw) - 1]
+                break
+
+    query = args.query or input("\nПоисковый запрос [налог НДС НДФЛ]: ").strip() or "налог НДС НДФЛ"
+    n     = args.n     or int(input("Количество документов [100]: ").strip() or "100")
+    return source, query, n
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Загрузчик судебных решений (sudact.ru / ГАС Правосудие)",
+    )
+    parser.add_argument("--source", choices=list(SOURCES.keys()), default=None)
+    parser.add_argument("--query",  default=None,  help="Поисковый запрос")
+    parser.add_argument("--n",      type=int, default=None, help="Количество документов")
+    args = parser.parse_args()
+
+    if not all([args.source, args.query, args.n]):
+        source, query, n = interactive_setup(args)
+    else:
+        source, query, n = args.source, args.query, args.n
+
+    out_file = Path(f"data/{source}/raw/docs.jsonl")
+    existing_docs, existing_ids = _load_existing(out_file)
+
+    if existing_docs:
+        print(f"Уже скачано: {len(existing_docs)} документов")
+
+    need = n - len(existing_docs)
+    if need <= 0:
+        print(f"Уже есть {len(existing_docs)} ≥ {n} документов, ничего не делаем.")
+        return
+
+    label, fetch_fn = SOURCES[source]
+    print(f"\nИсточник: {label}")
+    print(f"Запрос:   '{query}'")
+    print(f"Нужно ещё: {need} документов\n")
+
+    new_docs = fetch_fn(query, need, out_file, existing_ids)
+    _save_new(new_docs, out_file)
+
+    print(f"\nГотово: скачано {len(new_docs)} новых документов → {out_file}")
     print(f"Итого в файле: {len(existing_docs) + len(new_docs)}")
 
 
