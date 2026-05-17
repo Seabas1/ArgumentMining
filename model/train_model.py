@@ -40,7 +40,7 @@ SEED          = 42
 
 def load_samples(annotations_file: Path) -> list[dict]:
     samples = []
-    for line in annotations_file.read_text(encoding="utf-8").splitlines():
+    for line in annotations_file.read_text(encoding="utf-8-sig").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
