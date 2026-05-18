@@ -615,14 +615,16 @@ def ask(prompt: str, options: list[str], default: int = 1) -> int:
         print(f"     Введите число от 1 до {len(options)}")
 
 
-def ask_int(prompt: str, default: int) -> int:
+def ask_int(prompt: str, default: int) -> int | None:
     while True:
-        raw = input(f"{prompt} [{default}]: ").strip()
+        raw = input(f"{prompt} [{default}] (или 'all' для всех): ").strip()
         if not raw:
             return default
+        if raw.lower() == "all":
+            return None
         if raw.isdigit() and int(raw) > 0:
             return int(raw)
-        print("     Введите положительное целое число")
+        print("     Введите положительное целое число или 'all'")
 
 
 def get_ollama_models() -> list[str]:
@@ -702,13 +704,16 @@ def interactive_setup(args) -> dict:
         model = gemini_model_ids[idx - 1]
 
     # ── Количество документов ─────────────────────────
-    n = args.n if args.n else ask_int("\nКоличество документов", 50)
+    if args.n is not None:
+        n = None if str(args.n).lower() == "all" else int(args.n)
+    else:
+        n = ask_int("\nКоличество документов", 50)
 
     print()
     print(f"  Датасет:  {DATASETS[dataset_key]['label']}")
     print(f"  Провайдер: {PROVIDERS[provider]}")
     print(f"  Модель:   {model}")
-    print(f"  Документов: {n}")
+    print(f"  Документов: {'все' if n is None else n}")
     print()
 
     return {"dataset": dataset_key, "provider": provider, "model": model, "n": n}
@@ -987,8 +992,8 @@ def main():
                         help="LLM-провайдер")
     parser.add_argument("--model",    default=None,
                         help="Название модели (зависит от провайдера)")
-    parser.add_argument("--n",        type=int, default=None,
-                        help="Количество документов для разметки")
+    parser.add_argument("--n", default=None,
+                        help="Количество документов (число или 'all' для всех)")
     args = parser.parse_args()
 
     if not all([args.dataset, args.provider, args.model, args.n]):
@@ -1061,7 +1066,8 @@ def main():
 
     # ── Загрузка документов ───────────────────────────────────────────────────
     raw_dir.mkdir(parents=True, exist_ok=True)
-    docs = DATASET_LOADERS[dataset_key](n, raw_dir)
+    load_n = n if n is not None else 999_999
+    docs = DATASET_LOADERS[dataset_key](load_n, raw_dir)
 
     # ── Разметка ──────────────────────────────────────────────────────────────
     out_dir.mkdir(parents=True, exist_ok=True)
