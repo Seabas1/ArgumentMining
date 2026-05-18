@@ -24,7 +24,7 @@ LABELS   = ["CLAIM", "PREMISE", "EVIDENCE", "NON_ARG"]
 LABEL2ID = {lbl: i for i, lbl in enumerate(LABELS)}
 ID2LABEL = {i: lbl for i, lbl in enumerate(LABELS)}
 
-ANNOTATED_DIR = Path("data/rutar/final/annotations.jsonl")
+ANNOTATED_DIR = Path("data/final/annotations.jsonl")
 MODEL_NAME    = "DeepPavlov/rubert-base-cased"
 OUTPUT_DIR    = Path("model/checkpoints")
 MAX_LENGTH    = 256

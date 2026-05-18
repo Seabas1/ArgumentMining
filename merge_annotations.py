@@ -81,62 +81,67 @@ def interactive_dataset() -> str:
         print(f"     Введите число от 1 до {len(keys)}")
 
 
+GLOBAL_FINAL_JSONL = Path("data/final/annotations.jsonl")
+GLOBAL_FINAL_CSV   = Path("data/final/annotations.csv")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Объединение размеченных JSONL в единый датасет",
-        epilog="Без аргументов открывает интерактивное меню.",
+        epilog="Без аргументов собирает ВСЕ датасеты в data/final/.",
     )
-    parser.add_argument("--dataset",      choices=list(DATASETS.keys()), default=None)
-    parser.add_argument("--model",        default=None, help="Только эта модель (имя подпапки)")
-    parser.add_argument("--input-dir",    default=None)
+    parser.add_argument("--dataset", choices=list(DATASETS.keys()), default=None,
+                        help="Только один датасет (по умолчанию — все)")
+    parser.add_argument("--model",   default=None, help="Только эта модель (имя подпапки)")
     parser.add_argument("--output-jsonl", default=None)
     parser.add_argument("--output-csv",   default=None)
     args = parser.parse_args()
 
-    if args.input_dir and args.output_jsonl and args.output_csv:
-        input_dir    = Path(args.input_dir)
-        output_jsonl = Path(args.output_jsonl)
-        output_csv   = Path(args.output_csv)
+    output_jsonl = Path(args.output_jsonl) if args.output_jsonl else GLOBAL_FINAL_JSONL
+    output_csv   = Path(args.output_csv)   if args.output_csv   else GLOBAL_FINAL_CSV
+
+    # Определяем какие датасеты собирать
+    if args.dataset:
+        datasets_to_merge = [args.dataset]
     else:
-        dataset_key  = args.dataset or interactive_dataset()
-        ds_dir       = DATASETS[dataset_key]["dir"]
-        input_dir    = Path(args.input_dir)    if args.input_dir    else ds_dir / "annotated"
-        output_jsonl = Path(args.output_jsonl) if args.output_jsonl else ds_dir / "final" / "annotations.jsonl"
-        output_csv   = Path(args.output_csv)   if args.output_csv   else ds_dir / "final" / "annotations.csv"
+        datasets_to_merge = list(DATASETS.keys())
 
-    if not input_dir.exists():
-        print(f"Папка не найдена: {input_dir}", file=sys.stderr)
-        sys.exit(1)
+    all_rows = []
+    for dataset_key in datasets_to_merge:
+        input_dir = DATASETS[dataset_key]["dir"] / "annotated"
+        if not input_dir.exists():
+            print(f"  [{dataset_key}] нет папки annotated — пропускаем")
+            continue
 
-    models = list_models(input_dir)
-    if models:
-        print(f"Найдены модели: {', '.join(models)}")
-        if args.model and args.model not in models:
-            print(f"Модель '{args.model}' не найдена. Доступные: {', '.join(models)}", file=sys.stderr)
-            sys.exit(1)
+        models = list_models(input_dir)
+        rows = load_annotations(input_dir, model_filter=args.model)
+        if rows:
+            print(f"  [{dataset_key}] {len(rows)} записей  (модели: {', '.join(models)})")
+            all_rows.extend(rows)
+        else:
+            print(f"  [{dataset_key}] нет данных")
 
-    rows = load_annotations(input_dir, model_filter=args.model)
-    if not rows:
-        print(f"Нет данных в: {input_dir}", file=sys.stderr)
+    if not all_rows:
+        print("Нет данных для объединения.", file=sys.stderr)
         sys.exit(1)
 
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    save_jsonl(rows, output_jsonl)
-    save_csv(rows, output_csv)
+    save_jsonl(all_rows, output_jsonl)
+    save_csv(all_rows, output_csv)
 
-    label_counts = Counter(r["label"] for r in rows)
+    label_counts = Counter(r["label"] for r in all_rows)
     model_counts: dict[str, int] = {}
-    for r in rows:
+    for r in all_rows:
         key = r.get("model", "unknown")
         model_counts[key] = model_counts.get(key, 0) + 1
 
-    print(f"Объединено: {len(rows)} записей")
+    print(f"\nИтого: {len(all_rows)} записей")
     print(f"Метки: {' '.join(f'{k}:{v}' for k, v in sorted(label_counts.items()))}")
     for m, c in sorted(model_counts.items()):
         print(f"  {m}: {c}")
-    print(f"JSONL: {output_jsonl}")
+    print(f"\nJSONL: {output_jsonl}")
     print(f"CSV:   {output_csv}")
 
 
