@@ -20,7 +20,7 @@ from transformers import (
 
 # ── Константы ──────────────────────────────────────────────────────────────────
 
-LABELS   = ["CLAIM", "PREMISE", "EVIDENCE", "NON_ARG"]
+LABELS   = ["CLAIM", "PREMISE", "EVIDENCE", "NON_ARG", "REBUTTAL"]
 LABEL2ID = {lbl: i for i, lbl in enumerate(LABELS)}
 ID2LABEL = {i: lbl for i, lbl in enumerate(LABELS)}
 
