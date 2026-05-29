@@ -124,8 +124,8 @@ NON_ARG  — ТОЛЬКО чисто процедурный текст: даты
 4. Есть логическая связь «поскольку/так как → следовательно»? → PREMISE
 5. Только реквизиты/подписи/явка — ноль аргументации? → NON_ARG
 
-Отвечай ТОЛЬКО JSON, без пояснений:
-{"label": "МЕТКА", "confidence": 0.0-1.0, "reasoning": "1-2 предложения"}"""
+Отвечай ТОЛЬКО JSON. Поле reasoning ОБЯЗАТЕЛЬНО — не оставляй пустым:
+{"label": "МЕТКА", "confidence": 0.0-1.0, "reasoning": "1-2 предложения почему именно эта метка"}"""
 
 SYSTEM_PROMPT_RU_BATCH = """Ты размечаешь пронумерованный список предложений из российских правовых документов (судебные решения, постановления, законы).
 
@@ -189,8 +189,8 @@ DECISION ALGORITHM:
 4. Does it provide reasoning ("because", "since")? → PREMISE
 5. Only structural/transitional text? → NON_ARG
 
-Reply with ONLY JSON, no explanation:
-{"label": "LABEL", "confidence": 0.0-1.0, "reasoning": "1-2 sentences"}"""
+Reply with ONLY JSON. The reasoning field is REQUIRED — do not leave it empty:
+{"label": "LABEL", "confidence": 0.0-1.0, "reasoning": "1-2 sentences explaining why this label"}"""
 
 SYSTEM_PROMPT_EN_BATCH = """You annotate a numbered list of sentences from argumentative essays.
 
@@ -476,13 +476,23 @@ def annotate_sentence_ollama(client, model: str, sentence: str,
     if is_qwen3:
         options["think"] = False
     try:
-        response = client.chat(
-            model=model, messages=msgs,
-            format="json", options=options,
-        )
-        raw = response["message"]["content"].strip()
-        data = _extract_json_from_response(raw)
-        return _parse_label_response(data)
+        for attempt in range(2):
+            response = client.chat(
+                model=model, messages=msgs,
+                format="json", options=options,
+            )
+            raw = response["message"]["content"].strip()
+            data = _extract_json_from_response(raw)
+            result = _parse_label_response(data)
+            if result.get("reasoning", "").strip():
+                return result
+            if attempt == 0:
+                # Добавляем напоминание и повторяем
+                msgs = msgs + [
+                    {"role": "assistant", "content": raw},
+                    {"role": "user",      "content": "Заполни поле reasoning — объясни почему именно эта метка."},
+                ]
+        return result
     except Exception as e:
         print(f"  [ollama error] {e}")
         return {"label": "CLAIM", "confidence": 0.3,
@@ -702,6 +712,11 @@ def interactive_setup(args) -> dict:
         print("\nМодели Gemini:")
         idx = ask("Выбор", gemini_models)
         model = gemini_model_ids[idx - 1]
+
+    elif provider == "local" and not model:
+        default_ckpt = "model/checkpoints/best"
+        raw = input(f"\nПуть к чекпоинту [{default_ckpt}]: ").strip()
+        model = raw or default_ckpt
 
     # ── Количество документов ─────────────────────────
     if args.n is not None:
@@ -931,6 +946,11 @@ def load_sudresh(n: int, raw_dir: Path) -> list[dict]:
         print(f"Берём {n} документов из кэша: {cache_file}")
         return cached[:n]
 
+    # Если кэш непустой и просят «все» — скорее всего уже скачали всё что есть
+    if cached and n >= 999_999:
+        print(f"Берём все {len(cached)} документов из кэша: {cache_file}")
+        return cached
+
     print(f"Загружаем sud-resh-benchmark с HuggingFace...")
     try:
         from datasets import load_dataset
@@ -1029,6 +1049,11 @@ def main():
             sys.exit(1)
         annotate_fn = lambda sentence, ctx: annotate_sentence_ollama(client, model, sentence, ctx, lang)
 
+    elif provider == "local":
+        from model.predict import load_model, predict_sentence
+        checkpoint = Path(model) if model else Path("model/checkpoints/best")
+        local_model, local_tokenizer, local_device = load_model(checkpoint)
+        annotate_fn = lambda sentence, ctx: predict_sentence(local_model, local_tokenizer, local_device, sentence)
 
     else:  # gemini — batch mode with safety settings + response schema
         api_key = os.getenv("GEMINI_API_KEY")

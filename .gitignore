@@ -20,6 +20,10 @@ data/
 # Presentation/video folder
 Argument mining/
 
+# Model artifacts
+model/checkpoints/
+best_model.zip
+
 # Python cache
 __pycache__/
 *.pyc

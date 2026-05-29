@@ -10,22 +10,26 @@
 ArgumentMining/
 ├── annotate.py           # Разметка документов через LLM
 ├── merge_annotations.py  # Объединение результатов в единый датасет
+├── evaluate.py           # Сравнение разметки с эталоном
 ├── requirements.txt
 ├── .env                  # Секреты (не в git)
 ├── .env.example          # Шаблон для .env
-└── data/
+├── model/
+│   ├── train_model.py    # Дообучение ruBERT на dataset/annotations.jsonl
+│   └── predict.py        # Инференс обученной модели на новых документах
+├── dataset/                       # Готовый датасет для обучения (в git)
+│   ├── annotations.jsonl
+│   └── annotations.csv
+└── data/                          # Сырые и размеченные данные (не в git)
     ├── ruslawod/                  # Русские правовые документы (RusLawOD)
-    │   ├── raw/                   # parquet-файлы + JSONL-кэш
-    │   ├── annotated/             # По одному JSONL на документ
-    │   └── final/                 # annotations.jsonl, annotations.csv
-    ├── mixed_legal/               # Судебные решения + юридические новости (RU)
     │   ├── raw/
-    │   ├── annotated/
-    │   └── final/
-    └── rutar/                     # Письма Минфина/ФНС — налоговое обоснование (RU)
-        ├── raw/                   # rutar.xlsx + sources_dataset_for_rutar.json
-        ├── annotated/
-        └── final/
+    │   └── annotated/
+    ├── rutar/                     # Письма Минфина/ФНС — налоговое обоснование (RU)
+    │   ├── raw/
+    │   └── annotated/
+    └── sudresh/                   # Судебные решения РФ (sud-resh-benchmark)
+        ├── raw/
+        └── annotated/
 ```
 
 ---
@@ -34,9 +38,9 @@ ArgumentMining/
 
 | Ключ | Источник | Язык | Назначение |
 |------|----------|------|------------|
-| `ruslawod` | [irlspbru/RusLawOD](https://huggingface.co/datasets/irlspbru/RusLawOD) | RU | Основной корпус правовых текстов |
-| `mixed_legal` | [RussianNLP/Mixed-Summarization-Dataset](https://huggingface.co/datasets/RussianNLP/Mixed-Summarization-Dataset) | RU | Судебные решения + юридические новости — дополнительный правовой корпус |
-| `rutar` | локальный файл `data/rutar/raw/rutar.xlsx` | RU | 199 писем Минфина/ФНС с налоговым обоснованием — валидация качества разметки |
+| `ruslawod` | [irlspbru/RusLawOD](https://huggingface.co/datasets/irlspbru/RusLawOD) | RU | Русские правовые документы |
+| `rutar` | локальный файл `data/rutar/raw/rutar.xlsx` | RU | 166 писем Минфина/ФНС с налоговым обоснованием |
+| `sudresh` | [lawful-good-project/sud-resh-benchmark](https://huggingface.co/datasets/lawful-good-project/sud-resh-benchmark) | RU | ~1000 уникальных судебных решений РФ (10 правовых областей) |
 
 ---
 
@@ -75,51 +79,20 @@ cp .env.example .env               # заполни ключи
 python annotate.py
 ```
 
-```
-====================================================
-   Argument Mining — разметка аргументов
-====================================================
-
-Датасет:
-  >1. RusLawOD — русские правовые документы
-   2. Mixed Legal RU — судебные решения и юридические новости (RU)
-   3. RuTaR — письма Минфина/ФНС с налоговым обоснованием (RU)
-Выбор [1]:
-
-Провайдер LLM:
-  >1. Ollama (локально)
-   2. Gemini API
-Выбор [1]:
-
-Модели Ollama (скачаны локально):
-  >1. gemma4:e4b
-   2. llama3:latest
-   3. qwen2.5:7b
-Выбор [1]:
-
-Количество документов [50]:
-```
-
-**Скриптовый режим** — все параметры через флаги:
+**Скриптовый режим:**
 
 ```bash
 python annotate.py --dataset ruslawod --provider gemini --model gemini-2.5-flash --n 100
-python annotate.py --dataset mixed_legal --provider ollama --model qwen2.5:7b --n 30
+python annotate.py --dataset sudresh --provider ollama --model qwen2.5:7b --n all
 ```
 
 #### Провайдеры
 
-| Провайдер | Команда | Требования |
-|-----------|---------|------------|
-| Ollama | `--provider ollama` | `ollama serve` + `ollama pull <model>` |
-| Gemini | `--provider gemini` | `GEMINI_API_KEY` в `.env` |
-
-#### Локальные модели (Ollama)
-
-Список доступных моделей определяется автоматически через `ollama list`. Примеры:
-- `qwen2.5:7b`, `qwen3.5-9b`, `gemma4:e4b`, `llama3:latest`
-
-> Ollama доступна через Python-пакет (`pip install ollama`) или напрямую через REST API — пакет необязателен, достаточно запущенного процесса `ollama serve`.
+| Провайдер | Требования |
+|-----------|------------|
+| `ollama` | `ollama serve` + `ollama pull <model>` |
+| `gemini` | `GEMINI_API_KEY` в `.env` |
+| `local` | обученная модель в `model/checkpoints/best/` |
 
 Скрипт автоматически **пропускает уже размеченные документы** — запуск можно прерывать и возобновлять.
 
@@ -127,12 +100,45 @@ python annotate.py --dataset mixed_legal --provider ollama --model qwen2.5:7b --
 
 ### Объединение в датасет (`merge_annotations.py`)
 
+Собирает все датасеты в единый `dataset/annotations.jsonl`:
+
 ```bash
-python merge_annotations.py              # интерактивный выбор датасета
-python merge_annotations.py --dataset ruslawod
+python merge_annotations.py              # все датасеты
+python merge_annotations.py --dataset rutar
 ```
 
-Результат — `data/<dataset>/final/annotations.jsonl` и `annotations.csv`.
+---
+
+### Обучение модели (`model/train_model.py`)
+
+Дообучает `DeepPavlov/rubert-base-cased` на `data/final/annotations.jsonl`.
+
+```bash
+python model/train_model.py
+```
+
+Лучшая модель сохраняется в `model/checkpoints/best/`.
+
+---
+
+### Разметка своей моделью (`model/predict.py`)
+
+```bash
+python model/predict.py
+```
+
+Читает документы из `data/rutar/raw/rutar_docs.jsonl`, сохраняет в `data/rutar/annotated/local_rubert/`.
+
+---
+
+### Оценка качества (`evaluate.py`)
+
+Сравнивает разметку модели с ручным эталоном (папка `my` внутри `annotated/`):
+
+```bash
+python evaluate.py
+python evaluate.py --dataset rutar --model gemini-2_5-flash
+```
 
 ---
 
@@ -153,7 +159,7 @@ python merge_annotations.py --dataset ruslawod
 }
 ```
 
-`disputed: true` — эвристика: `confidence < 0.65` по самооценке модели. Используется как сигнал для приоритизации ручной проверки, не как калиброванная метрика качества.
+`disputed: true` — эвристика: `confidence < 0.65` по самооценке модели. Используется как сигнал для приоритизации ручной проверки.
 
 ---
 

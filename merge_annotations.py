@@ -81,20 +81,22 @@ def interactive_dataset() -> str:
         print(f"     Введите число от 1 до {len(keys)}")
 
 
-GLOBAL_FINAL_JSONL = Path("data/final/annotations.jsonl")
-GLOBAL_FINAL_CSV   = Path("data/final/annotations.csv")
+GLOBAL_FINAL_JSONL = Path("dataset/annotations.jsonl")
+GLOBAL_FINAL_CSV   = Path("dataset/annotations.csv")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Объединение размеченных JSONL в единый датасет",
-        epilog="Без аргументов собирает ВСЕ датасеты в data/final/.",
+        epilog="Без аргументов собирает ВСЕ датасеты в dataset/.",
     )
     parser.add_argument("--dataset", choices=list(DATASETS.keys()), default=None,
                         help="Только один датасет (по умолчанию — все)")
     parser.add_argument("--model",   default=None, help="Только эта модель (имя подпапки)")
     parser.add_argument("--output-jsonl", default=None)
     parser.add_argument("--output-csv",   default=None)
+    parser.add_argument("--skip-disputed", action="store_true",
+                        help="Исключить записи с disputed=True (ошибки и низкая уверенность)")
     args = parser.parse_args()
 
     output_jsonl = Path(args.output_jsonl) if args.output_jsonl else GLOBAL_FINAL_JSONL
@@ -115,6 +117,11 @@ def main():
 
         models = list_models(input_dir)
         rows = load_annotations(input_dir, model_filter=args.model)
+        if args.skip_disputed:
+            before = len(rows)
+            rows = [r for r in rows if not r.get("disputed")]
+            if before != len(rows):
+                print(f"  [{dataset_key}] отфильтровано disputed: {before - len(rows)}")
         if rows:
             print(f"  [{dataset_key}] {len(rows)} записей  (модели: {', '.join(models)})")
             all_rows.extend(rows)
