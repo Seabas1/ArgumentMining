@@ -30,7 +30,7 @@ OUTPUT_DIR    = Path("model/checkpoints")
 MAX_LENGTH    = 256
 BATCH_SIZE    = 16
 EPOCHS        = 10
-LR            = 2e-5
+LR            = 5e-6
 WARMUP_RATIO  = 0.1
 VAL_RATIO     = 0.15
 SEED          = 42
@@ -113,7 +113,6 @@ class ArgMiningDataset(Dataset):
 def compute_class_weights(samples: list[dict]) -> torch.Tensor:
     counts = Counter(s["label"] for s in samples)
     total  = len(samples)
-    # inversely proportional to frequency, normalised so mean weight = 1
     weights = torch.tensor(
         [total / (len(LABELS) * counts.get(lbl, 1)) for lbl in LABELS],
         dtype=torch.float,
