@@ -34,6 +34,12 @@ DATASETS = {
         "lang": "ru",
         "hf_id": "lawful-good-project/sud-resh-benchmark",
     },
+    "peessays": {
+        "label": "Persuasive Essays (Stab 2017) — English AM benchmark",
+        "dir": Path("data/peessays"),
+        "lang": "en",
+        "hf_id": "DriftLogic/Annotated_Persuasive_Essays",
+    },
 }
 
 PROVIDERS = {
@@ -46,8 +52,8 @@ HF_DOWNLOAD_RETRIES   = 3
 GEMINI_MAX_RETRIES    = 6
 GEMINI_BASE_DELAY     = 3.0
 GEMINI_RPM_LIMIT      = 10
-GEMINI_MIN_INTERVAL   = 60.0 / GEMINI_RPM_LIMIT  # 6 seconds on free tier
-_gemini_last_call     = [0.0]  # mutable container for rate-limiter state
+GEMINI_MIN_INTERVAL   = 60.0 / GEMINI_RPM_LIMIT  
+_gemini_last_call     = [0.0]  
 
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
@@ -785,10 +791,6 @@ def _extract_ruslawod(item: dict, idx: int) -> dict | None:
 
 
 def _extract_rutar(item: dict, idx: int) -> dict | None:
-    # xlsx был сохранён pandas с индексной колонкой → реальные поля сдвинуты:
-    # "letter_type" содержит тело ответного письма (самое длинное поле)
-    # "question_for_llm" содержит source URL
-    # "date_publication" содержит заголовок письма
     text = (
         str(item.get("letter_type") or "").strip()
         or str(item.get("full_text") or "").strip()
@@ -836,21 +838,31 @@ def load_ruslawod(n: int, raw_dir: Path) -> list[dict]:
     if parquet_files:
         try:
             from datasets import load_dataset
-            print(f"Загружаем из локальных parquet: {', '.join(p.name for p in parquet_files)}")
-            ds = load_dataset("parquet", data_files=[str(p) for p in parquet_files], split="train")
-            docs, seen_ids = [], set()
-            for idx, item in enumerate(ds):
-                doc = _extract_ruslawod(item, idx)
-                if doc and doc["doc_id"] not in seen_ids:
-                    seen_ids.add(doc["doc_id"])
-                    docs.append(doc)
-                if len(docs) >= n:
-                    break
+        except ImportError:
+            print("Установи: pip install datasets")
+            sys.exit(1)
+
+        docs, seen_ids = list(cached), {d["doc_id"] for d in cached}
+        for pf in parquet_files:
             if len(docs) >= n:
-                save_cached_docs(docs, cache_file)
-                return docs[:n]
-        except Exception as e:
-            print(f"  Ошибка при чтении parquet: {e}")
+                break
+            try:
+                print(f"  Читаем {pf.name} ({len(docs)}/{n})...")
+                ds = load_dataset("parquet", data_files=[str(pf)], split="train")
+                for idx, item in enumerate(ds):
+                    doc = _extract_ruslawod(item, idx)
+                    if doc and doc["doc_id"] not in seen_ids:
+                        seen_ids.add(doc["doc_id"])
+                        docs.append(doc)
+                    if len(docs) >= n:
+                        break
+            except Exception as e:
+                print(f"  Ошибка при чтении {pf.name}: {e}")
+                continue
+
+        if docs:
+            save_cached_docs(docs, cache_file)
+            return docs[:n]
 
     print(f"Загружаем {n} документов из HuggingFace ({DATASETS['ruslawod']['hf_id']})...")
     fetched = _load_hf_streaming(DATASETS["ruslawod"]["hf_id"], n, _extract_ruslawod)
@@ -985,10 +997,87 @@ def load_sudresh(n: int, raw_dir: Path) -> list[dict]:
     return docs[:n]
 
 
+# Маппинг меток PERSUADE corpus (Kaggle Feedback Prize 2021) → наша схема
+_PE_DISCOURSE_MAP = {
+    "Position":             "CLAIM",
+    "Claim":                "CLAIM",
+    "Concluding Statement": "CLAIM",
+    "Evidence":             "EVIDENCE",
+    "Counterclaim":         "REBUTTAL",
+    "Rebuttal":             "REBUTTAL",
+    "Lead":                 "NON_ARG",
+}
+
+
+def load_peessays(n: int, raw_dir: Path) -> list[dict]:
+    """
+    Загружает PERSUADE corpus (Kaggle Feedback Prize 2021) из train.csv.
+    Файл скачивается вручную с kaggle.com/competitions/feedback-prize-2021/data
+    и кладётся в data/peessays/raw/train.csv.
+
+    Каждый discourse element → отдельный «документ»:
+      doc_id = pe_{discourse_id}
+      text   = discourse_text
+      _gold  = mapped discourse_type (CLAIM / EVIDENCE / REBUTTAL / NON_ARG)
+
+    evaluate_eng.py сравнивает предсказания LLM с _gold по doc_id.
+    """
+    cache_file = raw_dir / "peessays_docs.jsonl"
+    cached = load_cached_docs(cache_file)
+    if len(cached) >= n:
+        print(f"Берём {n} документов из кэша: {cache_file}")
+        return cached[:n]
+
+    csv_path = raw_dir / "train.csv"
+    if not csv_path.exists():
+        print(f"\nФайл не найден: {csv_path}")
+        print("Скачай train.csv с Kaggle:")
+        print("  https://www.kaggle.com/competitions/feedback-prize-2021/data")
+        print(f"И положи в:  {raw_dir}/train.csv")
+        sys.exit(1)
+
+    print(f"Читаем {csv_path}...")
+    try:
+        import csv as _csv
+        docs: list[dict] = []
+        seen_ids: set[str] = {d["doc_id"] for d in cached}
+
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                if len(docs) + len(cached) >= n:
+                    break
+
+                text = row.get("discourse_text", "").strip()
+                if len(text) < 10:
+                    continue
+
+                discourse_id   = row.get("discourse_id") or row.get("id") or f"pe_{len(docs):06d}"
+                discourse_type = row.get("discourse_type", "").strip()
+                gold_label     = _PE_DISCOURSE_MAP.get(discourse_type, "NON_ARG")
+                doc_id         = f"pe_{_to_safe_id(discourse_id)}"
+
+                if doc_id in seen_ids:
+                    continue
+                seen_ids.add(doc_id)
+                docs.append({"doc_id": doc_id, "text": text, "_gold": gold_label,
+                              "_discourse_type": discourse_type})
+
+        merged = cached + docs
+        save_cached_docs(merged, cache_file)
+        print(f"Загружено {len(merged)} discourse elements")
+        return merged[:n]
+
+    except Exception as e:
+        print(f"Ошибка чтения {csv_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 DATASET_LOADERS = {
     "ruslawod": load_ruslawod,
     "rutar":    load_rutar,
     "sudresh":  load_sudresh,
+    "peessays": load_peessays,
 }
 
 
@@ -1055,7 +1144,7 @@ def main():
         local_model, local_tokenizer, local_device = load_model(checkpoint)
         annotate_fn = lambda sentence, ctx: predict_sentence(local_model, local_tokenizer, local_device, sentence)
 
-    else:  # gemini — batch mode with safety settings + response schema
+    else:  
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             print("Ошибка: GEMINI_API_KEY не задан. Добавь в .env: GEMINI_API_KEY=your_key")

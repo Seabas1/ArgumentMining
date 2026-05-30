@@ -24,6 +24,9 @@ Argument mining/
 model/checkpoints/
 best_model.zip
 
+# Датасет из разметки самой модели (регенерируется merge_model_annotations.py)
+dataset_model/
+
 # Python cache
 __pycache__/
 *.pyc

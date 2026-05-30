@@ -11,8 +11,10 @@ FIELDNAMES = ["doc_id", "position", "text", "label", "confidence",
               "reasoning", "disputed", "model", "source_file"]
 
 
-def load_annotations(annotated_dir: Path, model_filter: str | None = None) -> list[dict]:
+def load_annotations(annotated_dir: Path, model_filter: str | None = None,
+                     exclude_models: set[str] | None = None) -> list[dict]:
     rows = []
+    exclude_models = exclude_models or set()
     subdirs = sorted(annotated_dir.iterdir()) if annotated_dir.exists() else []
 
     model_dirs = [d for d in subdirs if d.is_dir()]
@@ -21,6 +23,8 @@ def load_annotations(annotated_dir: Path, model_filter: str | None = None) -> li
     if model_dirs:
         for model_dir in model_dirs:
             if model_filter and model_dir.name != model_filter:
+                continue
+            if model_dir.name in exclude_models:
                 continue
             for path in sorted(model_dir.glob("*.jsonl")):
                 for row in _read_jsonl(path):
@@ -93,10 +97,14 @@ def main():
     parser.add_argument("--dataset", choices=list(DATASETS.keys()), default=None,
                         help="Только один датасет (по умолчанию — все)")
     parser.add_argument("--model",   default=None, help="Только эта модель (имя подпапки)")
+    parser.add_argument("--exclude-model", action="append", default=[], metavar="NAME",
+                        help="Исключить разметку этой модели (можно указывать несколько раз)")
     parser.add_argument("--output-jsonl", default=None)
     parser.add_argument("--output-csv",   default=None)
     parser.add_argument("--skip-disputed", action="store_true",
                         help="Исключить записи с disputed=True (ошибки и низкая уверенность)")
+    parser.add_argument("--include-non-ru", action="store_true",
+                        help="Включить нероссийские датасеты (по умолчанию англоязычные, напр. peessays, пропускаются)")
     args = parser.parse_args()
 
     output_jsonl = Path(args.output_jsonl) if args.output_jsonl else GLOBAL_FINAL_JSONL
@@ -108,6 +116,16 @@ def main():
     else:
         datasets_to_merge = list(DATASETS.keys())
 
+    # В обучающий датасет идут только русскоязычные источники. Англоязычные
+    # (например, peessays) служат лишь для проверки пайплайна и в обучающую
+    # выборку не включаются. Явный --dataset уважается как есть.
+    if not args.dataset and not args.include_non_ru:
+        skipped = [d for d in datasets_to_merge if DATASETS[d].get("lang") != "ru"]
+        datasets_to_merge = [d for d in datasets_to_merge if DATASETS[d].get("lang") == "ru"]
+        if skipped:
+            print(f"Пропущены нероссийские датасеты: {', '.join(skipped)} "
+                  f"(--include-non-ru чтобы включить)")
+
     all_rows = []
     for dataset_key in datasets_to_merge:
         input_dir = DATASETS[dataset_key]["dir"] / "annotated"
@@ -116,7 +134,8 @@ def main():
             continue
 
         models = list_models(input_dir)
-        rows = load_annotations(input_dir, model_filter=args.model)
+        rows = load_annotations(input_dir, model_filter=args.model,
+                                exclude_models=set(args.exclude_model))
         if args.skip_disputed:
             before = len(rows)
             rows = [r for r in rows if not r.get("disputed")]

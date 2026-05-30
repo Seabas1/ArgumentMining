@@ -101,10 +101,10 @@ class ArgMiningDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         return {
-            "input_ids":      self.encodings["input_ids"][idx],
+            "input_ids": self.encodings["input_ids"][idx],
             "attention_mask": self.encodings["attention_mask"][idx],
             "token_type_ids": self.encodings["token_type_ids"][idx],
-            "labels":         self.labels[idx],
+            "labels":   self.labels[idx],
         }
 
 
